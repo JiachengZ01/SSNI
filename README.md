@@ -128,6 +128,12 @@ You can reproduce our results using seed: 121, 122, 123.
 - PyTorch 2.0.1
 - Other dependencies as listed in `requirements.txt`
 
+## Reference
+Our codebase is implemented based on the following code, we would like to thank for their great work.
+[https://github.com/NVlabs/DiffPure.git]
+[https://github.com/ml-postech/robust-evaluation-of-diffusion-based-purification.git]
+[https://github.com/ZSHsh98/EPS-AD.git]
+
 ## License
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
