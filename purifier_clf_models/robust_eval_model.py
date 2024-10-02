@@ -279,17 +279,37 @@ class AdaptivePurificationForward(PurificationModule):
         return xt
 
 
-    def preprocess(self, x): #TODO:BPDA
+    def preprocess(self, x, eps_standard, adv_eps):
+        eps_standard = torch.tensor(eps_standard)
         # diffusion part
         if self.is_imagenet:
             x = F.interpolate(x, size=(256, 256),
                               mode='bilinear', align_corners=False)
+            eps_mu = torch.mean(eps_standard)
+        else:
+            eps_mu = torch.max(eps_standard)
         x_diff = clf2diff(x)
-        for i in range(len(self.max_timestep)):
-            noised_x = self.get_noised_x(x_diff, self.max_timestep[i])
-            x_diff = self.denoising_process(noised_x, self.attack_steps[i])
+        if self.args.adaptive_defense_eval or self.args.whitebox_defense_eval:
+            num_denoising_steps = [int(i) for i in self.args.def_num_denoising_steps.split(',')]
+        else:
+            num_denoising_steps = [int(i) for i in self.args.att_num_denoising_steps.split(',')]
 
-        x_clf = diff2clf(x_diff)
+        for i in range(len(self.max_timestep)):
+            tau = self.args.tau
+            bias = self.args.bias
+            reweighted_t = torch.sigmoid(input=((adv_eps - eps_mu)/tau)) * (self.max_timestep[i] + bias)
+            reweighted_t = torch.round(reweighted_t).to(torch.int64).to(x_diff.device)
+            self.attack_steps[i] = get_diffusion_params(reweighted_t, (num_denoising_steps[i] + bias))
+            reweighted_t = torch.where((reweighted_t-1) < 0, torch.tensor(0, dtype=torch.int64), (reweighted_t-1))
+            print(f"The reweighted timesteps for this batch of sample are: {reweighted_t}")
+            noised_x = self.get_noised_x(x_diff, reweighted_t)
+            x_diff = self.denoising_process(noised_x, self.attack_steps[i])
+        # classifier part
+        if self.is_imagenet:
+            x_clf = diff2clf(F.interpolate(x_diff, size=(
+                224, 224), mode='bilinear', align_corners=False))
+        else:
+            x_clf = diff2clf(x_diff)
         return x_clf
 
     
@@ -301,6 +321,10 @@ class AdaptivePurificationForward(PurificationModule):
         if self.is_imagenet:
             x = F.interpolate(x, size=(256, 256),
                               mode='bilinear', align_corners=False)
+            eps_mu = torch.mean(eps_data)
+        else:
+            eps_mu = torch.max(eps_data)
+            # eps_mu = torch.quantile(eps_data, 0.75)
             
         x_diff = clf2diff(x)
         if self.args.adaptive_defense_eval or self.args.whitebox_defense_eval:
@@ -308,12 +332,11 @@ class AdaptivePurificationForward(PurificationModule):
         else:
             num_denoising_steps = [int(i) for i in self.args.att_num_denoising_steps.split(',')]
         for i in range(len(self.max_timestep)):
-            eps_mu = torch.mean(eps_data)
             tau = self.args.tau
             bias = self.args.bias
-            reweighted_t = torch.sigmoid(input=((adv_eps - eps_mu)/tau)) * self.max_timestep[i] + bias #TODO
+            reweighted_t = torch.sigmoid(input=((adv_eps - eps_mu)/tau)) * (self.max_timestep[i] + bias)
             reweighted_t = torch.round(reweighted_t).to(torch.int64).to(x_diff.device)
-            self.attack_steps[i] = get_diffusion_params(reweighted_t, num_denoising_steps[i])
+            self.attack_steps[i] = get_diffusion_params(reweighted_t, (num_denoising_steps[i] + bias))
             reweighted_t = torch.where((reweighted_t-1) < 0, torch.tensor(0, dtype=torch.int64), (reweighted_t-1))
             print(f"The reweighted timesteps for this batch of sample are: {reweighted_t}")
             noised_x = self.get_noised_x(x_diff, reweighted_t)
@@ -329,7 +352,7 @@ class AdaptivePurificationForward(PurificationModule):
 
 
     
-def get_diffusion_params(t_values, num_denoising_steps):
+def get_diffusion_params(t_values, num_denoising_steps): #TODO:Rename
     # Round up to ensure we get num_denoising_steps steps
     num_denoising_steps += 1
     if num_denoising_steps == 2: #edge case where t=1

@@ -252,7 +252,19 @@ def DBP_eval(rank, gpu, args, config):
                         
             # defense part
             if args.adaptive_defense_eval:
-                raise NotImplementedError("NotImplementedError")
+                print(f"Evaluating Adversarial Examples: pixel min - {torch.min(x_adv)}, pixel max - {torch.max(x_adv)}")
+                with torch.no_grad():
+                    pred_nat = predict(x, args, config, model, diffusion, eps_data, num_classes)
+                    correct_nat += pred_nat.eq(y.view_as(pred_nat)).sum().item()
+
+                    pred_adv = predict(x_adv, args, config, model, diffusion, eps_data, num_classes)
+                    correct_adv += pred_adv.eq(y_adv.view_as(pred_adv)).sum().item()
+
+                nat_total += x.shape[0]
+                adv_total += x_adv.shape[0]
+
+                print('rank {} | {} | num_x_samples: {} | num_adv_samples: {} | acc_nat: {:.3f}% | acc_adv: {:.3f}%'.format(
+                    rank, idx, nat_total.item(), adv_total.item(), (correct_nat / nat_total * 100).item(), (correct_adv / adv_total * 100).item()))
 
             elif args.whitebox_defense_eval:
                 print(f"pixel min: {torch.min(x)}, pixel max: {torch.max(x)}")
