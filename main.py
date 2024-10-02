@@ -1,9 +1,9 @@
 from attacks.pgd_eot import PGD, Whitebox_PGD
 from attacks.pgd_eot_l2 import PGDL2, Whitebox_PGDL2
-from attacks.pgd_eot_bpda import BPDA
+from attacks.pgd_eot_bpda import BPDA, Whitebox_BPDA
 import argparse
 import utils
-from utils import str2bool, get_image_classifier, load_diffusion, set_all_seed
+from utils import get_image_classifier, load_diffusion, set_all_seed, str2bool
 import logging
 import yaml
 import torch
@@ -13,7 +13,6 @@ from torch.multiprocessing import Process
 import torchvision.utils as tvu
 
 import os
-import time
 import datetime
 
 from load_data import load_dataset_by_name
@@ -21,7 +20,7 @@ from purifier_clf_models.sde_adv_model import SDE_Adv_Model
 from purifier_clf_models.robust_eval_model import PurificationForward, AdaptivePurificationForward, LinearPurificationForward
 from tqdm import tqdm
 from path import *
-from eps_standard import cf10_eps_standard, imagenet_eps_standard
+from eps_standard import load_dataset_eps
 from eps_calculation import reweight_t
 
 def get_diffusion_params(max_timesteps, num_denoising_steps):
@@ -44,7 +43,12 @@ def load_adv(args, config, diffusion, model, x, y):
             eps = 4./255.
         if "ours" in args.defense_method:
             attack = Whitebox_PGD(diffusion, args, config, model, attack_steps=args.n_iter,
-                            eps=eps, step_size=0.007, eot=args.eot)
+                            eps=eps, step_size=0.007, eot=args.eot, is_linear = False)
+            print('[Attack] Whitebox_PGD Linf | attack_steps: {} | eps: {:.3f} | eot: {}'.format(
+                args.n_iter, eps, args.eot))
+        elif "linear" in args.defense_method:
+            attack = Whitebox_PGD(diffusion, args, config, model, attack_steps=args.n_iter,
+                            eps=eps, step_size=0.007, eot=args.eot, is_linear = True)
             print('[Attack] Whitebox_PGD Linf | attack_steps: {} | eps: {:.3f} | eot: {}'.format(
                 args.n_iter, eps, args.eot))
         else:
@@ -56,8 +60,13 @@ def load_adv(args, config, diffusion, model, x, y):
         eps = 0.5
         if "ours" in args.defense_method:
             attack = Whitebox_PGDL2(diffusion, args, config, model, attack_steps=args.n_iter,
-                            eps=eps, step_size=0.007, eot=args.eot)
+                            eps=eps, step_size=0.007, eot=args.eot, is_linear = False)
             print('[Attack] Whitebox_PGD L2 | attack_steps: {} | eps: {} | eot: {}'.format(
+                args.n_iter, eps, args.eot))
+        elif "linear" in args.defense_method:
+            attack = Whitebox_PGDL2(diffusion, args, config, model, attack_steps=args.n_iter,
+                            eps=eps, step_size=0.007, eot=args.eot, is_linear = True)
+            print('[Attack] Whitebox_PGD L2 | attack_steps: {} | eps: {:.3f} | eot: {}'.format(
                 args.n_iter, eps, args.eot))
         else:
             attack = PGDL2(model, attack_steps=args.n_iter,
@@ -66,10 +75,21 @@ def load_adv(args, config, diffusion, model, x, y):
                 args.n_iter, eps, args.eot))
     elif args.attack_type == "bpda":
         eps = 8./255.
-        attack = BPDA(model, attack_steps=args.n_iter,
-                        eps=eps, step_size=0.007, eot=args.eot)
-        print('[Attack] BPDA Linf | attack_steps: {} | eps: {:.3f} | eot: {}'.format(
-            args.n_iter, eps, args.eot))
+        if "ours" in args.defense_method:
+            attack = Whitebox_BPDA(diffusion, args, config, model, attack_steps=args.n_iter,
+                            eps=eps, step_size=0.007, eot=args.eot, is_linear = False)
+            print('[Attack] Whitebox_BPDA+EOT | attack_steps: {} | eps: {:.3f} | eot: {}'.format(
+                args.n_iter, eps, args.eot))
+        elif "linear" in args.defense_method:
+            attack = Whitebox_BPDA(diffusion, args, config, model, attack_steps=args.n_iter,
+                            eps=eps, step_size=0.007, eot=args.eot, is_linear = True)
+            print('[Attack] Whitebox_BPDA+EOT | attack_steps: {} | eps: {:.3f} | eot: {}'.format(
+                args.n_iter, eps, args.eot))
+        else:
+            attack = BPDA(model, attack_steps=args.n_iter,
+                            eps=eps, step_size=0.007, eot=args.eot)
+            print('[Attack] BPDA+EOT Linf | attack_steps: {} | eps: {:.3f} | eot: {}'.format(
+                args.n_iter, eps, args.eot))
     else:
         raise NotImplementedError("No more attacks.")
     
@@ -83,11 +103,11 @@ def parse_args_and_config():
     # diffusion models
     parser.add_argument('--config', type=str, required=True, help='Path to the config file')
     parser.add_argument('--seed', type=int, default=1234, help='Random seed')
+    parser.add_argument('--data_seed', type=int, default=0, help='Random seed for subset data.')
     parser.add_argument("--use_cuda", action='store_true', help="Whether use gpu or not")
-    parser.add_argument("--use_wandb", action='store_true', help="Whether use wandb or not")
-    parser.add_argument("--wandb_project_name", default='test', help="Wandb project name")
-    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--batch_size', type=int, default=16)
 
+    #use these for origin_diffpure
     parser.add_argument('--classifier_name', type=str, default='Eyeglasses', help='which classifier to use')
     parser.add_argument('--dataset', type=str, default='cifar10', help='which domain: cifar10, imagenet')
     parser.add_argument('--t', type=int, default=400, help='Sampling noise scale')
@@ -97,35 +117,43 @@ def parse_args_and_config():
     parser.add_argument('--use_bm', action='store_true', help='whether to use brownian motion')
     parser.add_argument('--sample_step', type=int, default=1, help='Total sampling steps')
     parser.add_argument('--denoise_step_size', type=float, default=1e-3, help='Full gradient or surrogate process')
-    parser.add_argument('--defense_method', type=str, default="diffpure", help='baselines')
+    parser.add_argument('--defense_method', type=str, default="diffpure", help='baselines + (linear/non-linear) our method.')
     parser.add_argument('--tau', type=int, default=0, help='temperature parameter')
 
     parser.add_argument('--n_iter', type=int, default=200)
     parser.add_argument('--eot', type=int, default=20)
-    parser.add_argument('--attack_type', type=str, default='pgd', choices=['pgd', 'pgdl2', 'adaptive', 'bpda'])
-    parser.add_argument('--diffusion_type', type=str, default='ddpm', help='[ddpm, sde]')
+    parser.add_argument('--attack_type', type=str, default='pgd', choices=['pgd', 'pgdl2', 'bpda'])
+    parser.add_argument('--diffusion_type', type=str, default='sde', help='[ddpm, sde]')
     parser.add_argument('--score_type', type=str, default='guided_diffusion', help='[guided_diffusion, score_sde]')
     parser.add_argument('--verbose', type=str, default='info', help='Verbose level: info | debug | warning | critical')
 
     # Purification hyperparameters in defense
     parser.add_argument("--def_max_timesteps", type=str, default="", help='The number of forward steps for each purification step in defense')
     parser.add_argument('--def_num_denoising_steps', type=str, default="", help='The number of denoising steps for each purification step in defense')
-    parser.add_argument('--def_sampling_method', type=str, default='ddpm', choices=['ddpm', 'ddim'], help='Sampling method for the purification in defense')
-    parser.add_argument('--num_ensemble_runs', type=int, default=1, help='The number of ensemble runs for purification in defense')
+    parser.add_argument('--def_sampling_method', type=str, default='', choices=['ddpm', 'ddim', ''], help='Sampling method for the purification in defense')
 
     # Purification hyperparameters in attack generation
     parser.add_argument("--att_max_timesteps", type=str, default="", help='The number of forward steps for each purification step in attack')
     parser.add_argument('--att_num_denoising_steps', type=str, default="", help='The number of denoising steps for each purification step in attack')
-    parser.add_argument('--att_sampling_method', type=str, default='ddpm', choices=['ddpm', 'ddim'], help='Sampling method for the purification in attack')
+    parser.add_argument('--att_sampling_method', type=str, default='', choices=['ddpm', 'ddim',''], help='Sampling method for the purification in attack')
 
+    parser.add_argument('--num_ensemble_runs', type=int, default=1, help='The number of ensemble runs for purification in defense')
     #eps
     parser.add_argument('--diffuse_t', type=int,default=20) # CIFAR10:20, Imagenet: 50
     parser.add_argument('--bias', type=int, default=5, help="It determines the bias added onto the scale function.")
     parser.add_argument('--single_vector_norm_flag', action='store_true')	
     parser.add_argument('--detection_ensattack_norm_flag', action='store_true')
+    parser.add_argument('--show_eps_range_info', action='store_true')
+    parser.add_argument('--show_t', action='store_true')
+    parser.add_argument('--use_score', action='store_true')
+
+
     parser.add_argument('--adaptive_defense_eval', action='store_true')
     parser.add_argument('--whitebox_defense_eval', action='store_true')
     parser.add_argument('--ablation', action='store_true')
+    parser.add_argument('--tau_ablation', action='store_true')
+    parser.add_argument('--save_as_pdf', action='store_true')
+    parser.add_argument('--save_purify_img', action='store_true')
 
     #Torch DDP
     parser.add_argument('--num_proc_node', type=int, default=1, help='The number of nodes in multi node env.')
@@ -155,15 +183,22 @@ def parse_args_and_config():
     logger.setLevel(level)
 
     if args.ablation:
+        args.adv_data_dir = os.path.join("ablation_data", "seed" + str(args.seed), args.defense_method, args.classifier_name + args.attack_type)
+        if args.whitebox_defense_eval or args.adaptive_defense_eval:
+            args.adv_data_dir = os.path.join("ablation_data", "seed" + str(121), args.defense_method, args.classifier_name + args.attack_type)
+    elif args.tau_ablation:
         args.adv_data_dir = os.path.join("ablation_data", "seed" + str(args.seed), "t"+str(args.tau), args.attack_type)
+        if args.whitebox_defense_eval or args.adaptive_defense_eval:
+            args.adv_data_dir = os.path.join("ablation_data", "seed" + str(121), "t"+str(args.tau), args.attack_type)
+    elif args.use_score:
+        args.adv_data_dir = os.path.join("additional", args.dataset, "seed" + str(args.seed), args.defense_method, args.classifier_name + args.attack_type)
+        if args.whitebox_defense_eval or args.adaptive_defense_eval:
+            args.adv_data_dir = os.path.join("additional", args.dataset, "seed" + str(121), args.defense_method, args.classifier_name + args.attack_type)
     else:
         args.adv_data_dir = os.path.join("adversarial_examples", args.dataset, "seed" + str(args.seed), args.defense_method, args.classifier_name + args.attack_type)
-
-
+        if args.whitebox_defense_eval or args.adaptive_defense_eval:
+            args.adv_data_dir = os.path.join("adversarial_examples", args.dataset, "seed" + str(121), args.defense_method, args.classifier_name + args.attack_type)
     os.makedirs(args.adv_data_dir, exist_ok=True)
-
-    # args.eps_norm_dir = os.path.join(f"{args.defense_method}_eps_data", args.dataset)
-    # os.makedirs(args.eps_norm_dir, exist_ok=True) # 等eps calculation需要保存再uncomments
 
     # add device
     device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -184,7 +219,8 @@ def DBP_eval(rank, gpu, args, config):
     is_imagenet = True if args.dataset == 'imagenet' else False
     dataset_root = imagenet_path if is_imagenet else './dataset'
     num_classes = 1000 if is_imagenet else 10
-    testset = load_dataset_by_name(args.dataset, dataset_root, 512)
+    num_of_data = 128 if is_imagenet else 512
+    testset = load_dataset_by_name(args.dataset, args.data_seed, dataset_root, num_of_data)
     testsampler = torch.utils.data.distributed.DistributedSampler(testset,
                                                                   num_replicas=args.world_size,
                                                                   rank=rank)
@@ -213,10 +249,7 @@ def DBP_eval(rank, gpu, args, config):
             args.batch_seed = idx
             x = x.to(config.device)
             y = y.to(config.device)
-            if args.dataset == "cifar10":
-                eps_data = cf10_eps_standard
-            else:
-                eps_data = imagenet_eps_standard
+            eps_data = load_dataset_eps(args)
 
             # attack part, generate adversarial examples.
             adv_data_pt = os.path.join(args.adv_data_dir, "adv_data", f"adversarial_examples_batch_{idx}.pt")
@@ -290,28 +323,34 @@ def DBP_eval(rank, gpu, args, config):
 
     else:
 
-        # Process diffusion hyperparameters
+        # Specify adversarial attack target.
         att_max_timesteps, att_diffusion_steps = get_diffusion_params(
             args.att_max_timesteps, args.att_num_denoising_steps)
         if "ours" in args.defense_method: #Our method using a adaptive forward call.
             attack_forward = AdaptivePurificationForward(
                 args, config, clf, diffusion, att_max_timesteps, att_diffusion_steps, args.att_sampling_method, is_imagenet, device=config.device)
-            print("Attack type: adaptive white-box attack!")
+            print("Attack type: adaptive white-box attack to our non-linear method!")
+        elif "linear" in args.defense_method:
+            attack_forward = LinearPurificationForward(
+                args, config, clf, diffusion, att_max_timesteps, att_diffusion_steps, args.att_sampling_method, is_imagenet, device=config.device)
+            print("Attack type: adaptive white-box attack to our linear method!")
         else:
             attack_forward = PurificationForward(
-                clf, diffusion, att_max_timesteps, att_diffusion_steps, args.att_sampling_method, is_imagenet, device=config.device)
-            print("Attack type: white-box attack!")
+                args, clf, diffusion, att_max_timesteps, att_diffusion_steps, args.att_sampling_method, is_imagenet, device=config.device)
+            print("Attack type: white-box attack to baselines!")
         for idx, (x, y) in tqdm(enumerate(testLoader), desc="One batch starts."):
             args.batch_seed = idx
             x = x.to(config.device)
             y = y.to(config.device)
-            if args.dataset == "cifar10":
-                eps_data = cf10_eps_standard
-            else:
-                eps_data = imagenet_eps_standard
+            eps_data = load_dataset_eps(args)
 
             # attack part, generate adversarial examples.
-            adv_data_pt = os.path.join(args.adv_data_dir, "adv_data", f"adversarial_examples_batch_{idx}.pt")
+            if args.dataset == "imagenet":
+                adv_data_pt = os.path.join(args.adv_data_dir, "adv_data", f"ds_{args.data_seed}", f"adversarial_examples_batch_{idx}.pt")
+            else:
+                adv_data_pt = os.path.join(args.adv_data_dir, "adv_data", f"adversarial_examples_batch_{idx}.pt")
+            nat_data_pt = os.path.join(args.adv_data_dir, "adv_data", f"nat_examples_batch_{idx}.pt")
+            # torch.save(x, nat_data_pt)
             if os.path.exists(adv_data_pt):
                 print(f"Batch {idx} exists, loading x_adv and y data.")
                 data = torch.load(adv_data_pt)
@@ -332,13 +371,13 @@ def DBP_eval(rank, gpu, args, config):
                     all_x_adv = torch.cat(gathered_x_adv, dim=0)
                     all_x = torch.cat(gathered_x, dim=0)
                     all_y = torch.cat(gathered_y, dim=0)
-                    os.makedirs('{}/imgs'.format(args.adv_data_dir), exist_ok=True)
-                    os.makedirs(os.path.join(args.adv_data_dir, "adv_data"), exist_ok=True)
+                    os.makedirs('{}/imgs/{}'.format(args.adv_data_dir, f"ds_{args.data_seed}"), exist_ok=True)
+                    os.makedirs(os.path.join(args.adv_data_dir, "adv_data", f"ds_{args.data_seed}"), exist_ok=True)
 
                     torch.save({'x_adv': all_x_adv, 'y': all_y}, 
-                            os.path.join(args.adv_data_dir, "adv_data", f"adversarial_examples_batch_{idx}.pt"))
-                    tvu.save_image(all_x, '{}/imgs/{}_x.png'.format(args.adv_data_dir, idx))
-                    tvu.save_image(all_x_adv, '{}/imgs/{}_x_adv.png'.format(args.adv_data_dir, idx))
+                            os.path.join(args.adv_data_dir, "adv_data", f"ds_{args.data_seed}", f"adversarial_examples_batch_{idx}.pt"))
+                    tvu.save_image(all_x, '{}/imgs/{}/{}_x.png'.format(args.adv_data_dir, f"ds_{args.data_seed}", idx))
+                    tvu.save_image(all_x_adv, '{}/imgs/{}/{}_x_adv.png'.format(args.adv_data_dir, f"ds_{args.data_seed}", idx))
                 
                 dist.barrier()
                         
@@ -346,9 +385,10 @@ def DBP_eval(rank, gpu, args, config):
             if args.adaptive_defense_eval:
                 def_max_timesteps, def_diffusion_steps = get_diffusion_params(
                     args.def_max_timesteps, args.def_num_denoising_steps)
-                # 需要改def的两个参数，首先diff和max的步数保持一致，但max需要经过reweight
-                advanced_defense_forward = AdaptivePurificationForward(args, config, clf, diffusion, def_max_timesteps, def_diffusion_steps, args.def_sampling_method, is_imagenet, device=config.device)
-
+                if "ours" in args.defense_method:
+                    advanced_defense_forward = AdaptivePurificationForward(args, config, clf, diffusion, def_max_timesteps, def_diffusion_steps, args.def_sampling_method, is_imagenet, device=config.device)
+                elif "linear" in args.defense_method:
+                    advanced_defense_forward = LinearPurificationForward(args, config, clf, diffusion, def_max_timesteps, def_diffusion_steps, args.def_sampling_method, is_imagenet, device=config.device)
                 print(f"Evaluating Adversarial Examples: pixel min - {torch.min(x_adv)}, pixel max - {torch.max(x_adv)}")
                 with torch.no_grad():
                     pred_nat = predict(x, args, config, advanced_defense_forward, diffusion, eps_data, num_classes)
@@ -362,14 +402,13 @@ def DBP_eval(rank, gpu, args, config):
 
                 print('rank {} | {} | num_x_samples: {} | num_adv_samples: {} | acc_nat: {:.3f}% | acc_adv: {:.3f}%'.format(
                     rank, idx, nat_total.item(), adv_total.item(), (correct_nat / nat_total * 100).item(), (correct_adv / adv_total * 100).item()))
-                # from IPython import embed;embed()
 
         
             elif args.whitebox_defense_eval:
                 def_max_timesteps, def_diffusion_steps = get_diffusion_params(
                     args.def_max_timesteps, args.def_num_denoising_steps)
 
-                defense_forward = PurificationForward(clf, diffusion, def_max_timesteps, def_diffusion_steps, args.def_sampling_method, is_imagenet, device=config.device)
+                defense_forward = PurificationForward(args, clf, diffusion, def_max_timesteps, def_diffusion_steps, args.def_sampling_method, is_imagenet, device=config.device)
 
 
                 print(f"Evaluating Adversarial Examples: pixel min - {torch.min(x_adv)}, pixel max - {torch.max(x_adv)}")
@@ -398,8 +437,10 @@ def predict(x, args, config, model, diffusion, eps_data, num_classes):
     for _ in range(args.num_ensemble_runs):
         _x = x.clone()
         eps_range, adv_eps = reweight_t(_x, diffusion, eps_data, args, config)
-        logits = model(_x, eps_data, adv_eps)
-        # logits = model(_x, eps_range, adv_eps)
+        if "ours" in args.defense_method:
+            logits = model(_x, eps_data, adv_eps)
+        else:
+            logits = model(_x, eps_range, adv_eps)
         pred = logits.max(1, keepdim=True)[1]
         
         for idx in range(x.shape[0]):

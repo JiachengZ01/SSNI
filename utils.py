@@ -58,7 +58,6 @@ def str2bool(v):
 
 def update_state_dict(state_dict, idx_start=9):
     '''
-    用于处理dataparallel训练好的参数是分开储存的形式，用这个函数可以将dict中key的名字修改。
     '''
     from collections import OrderedDict
     new_state_dict = OrderedDict()
@@ -162,7 +161,7 @@ def load_diffusion(args, model_src, device):
         model_config.update(vars(config.model))
         diffusion, _ = create_model_and_diffusion(**model_config)
         diffusion.load_state_dict(torch.load(model_src, map_location='cpu'))
-        # diffusion.convert_to_fp16()
+        diffusion.convert_to_fp16()
         diffusion.eval().to(device)
 
     return diffusion
@@ -207,7 +206,7 @@ def load_data(args):
                                             num_sub=args.num_sub, data_seed=0)
         n_samples = len(val_data)
         print('length of validation data is: ', len(val_data))
-        val_loader = DataLoader(val_data, batch_size=n_samples, shuffle=False, pin_memory=True, num_workers=1) #TODO:这里的num workers可能需要修改
+        val_loader = DataLoader(val_data, batch_size=n_samples, shuffle=False, pin_memory=True, num_workers=1)
         x_val, y_val = next(iter(val_loader))
     else:
         raise NotImplementedError(f'Unknown domain: {args.dataset}!')
@@ -220,7 +219,7 @@ def load_data(args):
 
 def load_data_from_train(args):
     if 'imagenet' in args.dataset:
-        val_dir = '/data/gpfs/datasets/Imagenet/ILSVRC/Data/CLS-LOC/train'  # using imagenet lmdb data
+        val_dir = '/data/datasets/Imagenet/ILSVRC/Data/CLS-LOC/train'  # using imagenet lmdb data
         val_transform = dataset.get_transform(args.dataset, 'imtrain', base_size=224)
         val_data = dataset.imagenet_lmdb_dataset_sub(val_dir, transform=val_transform,
                                                   num_sub=5000, data_seed=0)
@@ -231,7 +230,7 @@ def load_data_from_train(args):
         data_dir = './dataset'
         transform = transforms.Compose([transforms.ToTensor()])
         val_data = dataset.cifar10_train_data_sub(args, data_dir, transform=transform,
-                                            num_sub=5000, data_seed=0) #TODO:may need to change seed, add more arguments.
+                                            num_sub=5000, data_seed=0)
         n_samples = len(val_data)
         print('length of validation data is: ', len(val_data))
         val_loader = DataLoader(val_data, batch_size=n_samples, shuffle=False, pin_memory=True, num_workers=1)
