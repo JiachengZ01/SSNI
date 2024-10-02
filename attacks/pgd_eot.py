@@ -3,7 +3,7 @@ import torch.nn.functional as F
 
 from tqdm import tqdm
 
-from eps_standard import cf10_eps_standard, imagenet_eps_standard
+from eps_standard import load_dataset_eps
 from eps_calculation import reweight_t
 
 class PGD:
@@ -54,7 +54,7 @@ class PGD:
     
 
 class Whitebox_PGD:
-    def __init__(self, diffusion, args, config, get_logit, attack_steps=200, eps=8./255., step_size=0.007, target=None, eot=20):
+    def __init__(self, diffusion, args, config, get_logit, attack_steps=200, eps=8./255., step_size=0.007, target=None, eot=20, is_linear=False):
         self.target = target
         self.clamp = (0,1)
         self.eps = eps
@@ -65,6 +65,7 @@ class Whitebox_PGD:
         self.diffusion = diffusion
         self.args = args
         self.config = config
+        self.is_linear = is_linear
 
     def _random_init(self, x):
         x = x + (torch.rand(x.size(), dtype=x.dtype, device=x.device) - 0.5) * 2 * self.eps
@@ -77,10 +78,7 @@ class Whitebox_PGD:
     
     def forward(self, x, y):
         x_adv = x.detach().clone()
-        if self.args.dataset == "cifar10":
-            eps_standard = cf10_eps_standard
-        elif self.args.dataset == "imagenet":
-            eps_standard = imagenet_eps_standard
+        eps_standard = load_dataset_eps(self.args)
         for _ in tqdm(range(self.attack_steps), desc="Whitebox PGD Linf attack iters", leave=False):
             grad = torch.zeros_like(x_adv)
             eps_range, adv_eps = reweight_t(x_adv, self.diffusion, eps_standard, self.args, self.config)
@@ -90,8 +88,10 @@ class Whitebox_PGD:
                 x_adv.requires_grad = True
                 
                 # Classification
-                logits = self.get_logit(x_adv, eps_standard, adv_eps)
-                # logits = self.get_logit(x_adv, eps_range, adv_eps)
+                if self.is_linear:
+                    logits = self.get_logit(x_adv, eps_range, adv_eps)
+                else:
+                    logits = self.get_logit(x_adv, eps_standard, adv_eps)
                 
                 
                 # Calculate loss

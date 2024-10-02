@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from utils import diff2clf, clf2diff
 import torchvision.utils as tvu
+import os
 
 
 
@@ -60,8 +61,8 @@ class LinearPurificationForward(PurificationModule):
 
     def get_noised_x(self, x, t):
         e = torch.randn_like(x)
-        assert x.shape[0] == t.shape[0] # batch size个reweighted t
-        a = (1 - self.betas).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1) #self.betas 1000个数
+        assert x.shape[0] == t.shape[0]
+        a = (1 - self.betas).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
         x = x * a.sqrt() + e * (1.0 - a).sqrt()
         return x
     
@@ -80,8 +81,6 @@ class LinearPurificationForward(PurificationModule):
             next_t = j.to(x.device)
             assert t.size(0) == next_t.size(0)
             assert t.size(0) == n
-            # print(t)
-            # print(next_t)
             at = self.compute_alpha(t.long())
             at_next = self.compute_alpha(next_t.long())
             et = self.diffusion(xt, t)
@@ -97,14 +96,26 @@ class LinearPurificationForward(PurificationModule):
         return xt
 
 
-    def preprocess(self, x): #TODO:BPDA
+    def preprocess(self, x, reweight_range, adv_eps):
         # diffusion part
         if self.is_imagenet:
             x = F.interpolate(x, size=(256, 256),
                               mode='bilinear', align_corners=False)
         x_diff = clf2diff(x)
+        if self.args.adaptive_defense_eval or self.args.whitebox_defense_eval:
+            att_num_denoising_steps = [int(i) for i in self.args.def_num_denoising_steps.split(',')]
+        else:
+            att_num_denoising_steps = [int(i) for i in self.args.att_num_denoising_steps.split(',')]
         for i in range(len(self.max_timestep)):
-            noised_x = self.get_noised_x(x_diff, self.max_timestep[i])
+            target_range = self.max_timestep[i]
+            (max_eps, min_eps) = reweight_range
+            zoom_ratio = target_range / (max_eps - min_eps)
+            bias = self.args.bias
+            reweighted_t = (adv_eps - min_eps) * zoom_ratio + (self.max_timestep[i]/2 - target_range/2 + bias)
+            reweighted_t = torch.round(reweighted_t).to(torch.int64).to(x_diff.device)
+            self.attack_steps[i] = get_diffusion_params(reweighted_t, att_num_denoising_steps[i])
+            reweighted_t = torch.where((reweighted_t-1) < 0, torch.tensor(0, dtype=torch.int64), (reweighted_t-1))
+            noised_x = self.get_noised_x(x_diff, reweighted_t)
             x_diff = self.denoising_process(noised_x, self.attack_steps[i])
 
         x_clf = diff2clf(x_diff)
@@ -122,7 +133,6 @@ class LinearPurificationForward(PurificationModule):
             att_num_denoising_steps = [int(i) for i in self.args.def_num_denoising_steps.split(',')]
         else:
             att_num_denoising_steps = [int(i) for i in self.args.att_num_denoising_steps.split(',')]
-        # z_list = []
         for i in range(len(self.max_timestep)):
             target_range = self.max_timestep[i]
             (max_eps, min_eps) = reweight_range
@@ -132,32 +142,34 @@ class LinearPurificationForward(PurificationModule):
             reweighted_t = torch.round(reweighted_t).to(torch.int64).to(x_diff.device)
             self.attack_steps[i] = get_diffusion_params(reweighted_t, att_num_denoising_steps[i])
             reweighted_t = torch.where((reweighted_t-1) < 0, torch.tensor(0, dtype=torch.int64), (reweighted_t-1))
-            print(reweighted_t)
+            if self.args.show_t:
+                print(reweighted_t)
             noised_x = self.get_noised_x(x_diff, reweighted_t)
-            # z_list.append(z)
-            x_diff = self.denoising_process(noised_x, self.attack_steps[i])
+            x_diff = self.denoising_process(noised_x, (self.attack_steps[i] + bias))
         # classifier part
         if self.is_imagenet:
             x_clf = diff2clf(F.interpolate(x_diff, size=(
                 224, 224), mode='bilinear', align_corners=False))
         else:
             x_clf = diff2clf(x_diff)
+        if self.args.save_purify_img:
+            torch.save(x_clf, os.path.join(self.args.adv_data_dir, "adv_data", f"purified_examples_batch_{self.args.batch_seed}.pt"))
         logits = self.clf(x_clf)
         return logits
 
 
 
 class PurificationForward(PurificationModule):
-    def __init__(self, clf, diffusion, max_timestep, attack_steps, sampling_method, is_imagenet, device):
+    def __init__(self, args, clf, diffusion, max_timestep, attack_steps, sampling_method, is_imagenet, device):
         super().__init__(clf, diffusion, max_timestep, attack_steps, sampling_method, is_imagenet, device)
-
+        self.args = args
 
     def get_noised_x(self, x, t):
         e = torch.randn_like(x)
         if type(t) == int:
-            t = (torch.ones(x.shape[0]) * t).to(x.device).long() #batch size个同样的t
-        assert x.shape[0] == t.shape[0] # batch size个reweighted t
-        a = (1 - self.betas).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1) #self.betas 1000个数
+            t = (torch.ones(x.shape[0]) * t).to(x.device).long()
+        assert x.shape[0] == t.shape[0] 
+        a = (1 - self.betas).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
         x = x * a.sqrt() + e * (1.0 - a).sqrt()
         return x
 
@@ -185,7 +197,7 @@ class PurificationForward(PurificationModule):
         return xt
     
     
-    def preprocess(self, x): #TODO:BPDA
+    def preprocess(self, x):
         # diffusion part
         if self.is_imagenet:
             x = F.interpolate(x, size=(256, 256),
@@ -199,19 +211,15 @@ class PurificationForward(PurificationModule):
         return x_clf
     
 
-    def forward(self, x):#TODO:calculate eps before forward call, input to forward,use original x to calculate eps.
+    def forward(self, x):
         # diffusion part
         if self.is_imagenet:
             x = F.interpolate(x, size=(256, 256),
                               mode='bilinear', align_corners=False)
         x_diff = clf2diff(x)
-        for i in range(len(self.max_timestep)): #TODO:Save clean image. It is a multiple diffusion step implementation style.
+        for i in range(len(self.max_timestep)):
             noised_x = self.get_noised_x(x_diff, self.max_timestep[i])
-            # save_noised_x = diff2clf(noised_x).squeeze(0).cpu().numpy().transpose(1,2,0)
-            # plt.imshow(save_noised_x)
-            # plt.axis('off')
-            # plt.savefig(f'noise_img.svg', format='svg', bbox_inches='tight', pad_inches=0)
-            # plt.close()
+
             x_diff = self.denoising_process(noised_x, self.attack_steps[i])
 
         # classifier part
@@ -223,10 +231,8 @@ class PurificationForward(PurificationModule):
         else:
             x_clf = diff2clf(x_diff)
 
-        # plt.imshow(x_clf.squeeze(0).cpu().numpy().transpose(1,2,0))
-        # plt.axis('off')
-        # plt.savefig(f'denoised_img.svg', format='svg', bbox_inches='tight', pad_inches=0)
-        # plt.close()
+        if self.args.save_purify_img:
+            torch.save(x_clf, os.path.join(self.args.adv_data_dir, "adv_data", f"purified_examples_batch_{self.args.batch_seed}.pt"))
         logits = self.clf(x_clf)
         return logits
     
@@ -242,8 +248,8 @@ class AdaptivePurificationForward(PurificationModule):
 
     def get_noised_x(self, x, t):
         e = torch.randn_like(x)
-        assert x.shape[0] == t.shape[0] # batch size个reweighted t
-        a = (1 - self.betas).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1) #self.betas 1000个数
+        assert x.shape[0] == t.shape[0] 
+        a = (1 - self.betas).cumprod(dim=0).index_select(0, t).view(-1, 1, 1, 1)
         x = x * a.sqrt() + e * (1.0 - a).sqrt()
         return x
     
@@ -262,8 +268,6 @@ class AdaptivePurificationForward(PurificationModule):
             next_t = j.to(x.device)
             assert t.size(0) == next_t.size(0)
             assert t.size(0) == n
-            # print(t)
-            # print(next_t)
             at = self.compute_alpha(t.long())
             at_next = self.compute_alpha(next_t.long())
             et = self.diffusion(xt, t)
@@ -287,7 +291,8 @@ class AdaptivePurificationForward(PurificationModule):
                               mode='bilinear', align_corners=False)
             eps_mu = torch.mean(eps_standard)
         else:
-            eps_mu = torch.max(eps_standard)
+            # eps_mu = torch.max(eps_standard)
+            eps_mu = torch.mean(eps_standard)
         x_diff = clf2diff(x)
         if self.args.adaptive_defense_eval or self.args.whitebox_defense_eval:
             num_denoising_steps = [int(i) for i in self.args.def_num_denoising_steps.split(',')]
@@ -301,7 +306,8 @@ class AdaptivePurificationForward(PurificationModule):
             reweighted_t = torch.round(reweighted_t).to(torch.int64).to(x_diff.device)
             self.attack_steps[i] = get_diffusion_params(reweighted_t, (num_denoising_steps[i] + bias))
             reweighted_t = torch.where((reweighted_t-1) < 0, torch.tensor(0, dtype=torch.int64), (reweighted_t-1))
-            print(f"The reweighted timesteps for this batch of sample are: {reweighted_t}")
+            if self.args.show_t:
+                print(reweighted_t)
             noised_x = self.get_noised_x(x_diff, reweighted_t)
             x_diff = self.denoising_process(noised_x, self.attack_steps[i])
         # classifier part
@@ -321,10 +327,7 @@ class AdaptivePurificationForward(PurificationModule):
         if self.is_imagenet:
             x = F.interpolate(x, size=(256, 256),
                               mode='bilinear', align_corners=False)
-            eps_mu = torch.mean(eps_data)
-        else:
-            eps_mu = torch.max(eps_data)
-            # eps_mu = torch.quantile(eps_data, 0.75)
+        eps_mu = torch.mean(eps_data)
             
         x_diff = clf2diff(x)
         if self.args.adaptive_defense_eval or self.args.whitebox_defense_eval:
@@ -336,9 +339,13 @@ class AdaptivePurificationForward(PurificationModule):
             bias = self.args.bias
             reweighted_t = torch.sigmoid(input=((adv_eps - eps_mu)/tau)) * (self.max_timestep[i] + bias)
             reweighted_t = torch.round(reweighted_t).to(torch.int64).to(x_diff.device)
-            self.attack_steps[i] = get_diffusion_params(reweighted_t, (num_denoising_steps[i] + bias))
+            if self.args.adaptive_defense_eval or self.args.whitebox_defense_eval:
+                self.attack_steps[i] = get_diffusion_params(reweighted_t, (num_denoising_steps[i] + bias))
+            else:
+                self.attack_steps[i] = get_diffusion_params(reweighted_t, num_denoising_steps[i])
             reweighted_t = torch.where((reweighted_t-1) < 0, torch.tensor(0, dtype=torch.int64), (reweighted_t-1))
-            print(f"The reweighted timesteps for this batch of sample are: {reweighted_t}")
+            if self.args.show_t:
+                print(reweighted_t)
             noised_x = self.get_noised_x(x_diff, reweighted_t)
             x_diff = self.denoising_process(noised_x, self.attack_steps[i])
         # classifier part
@@ -347,12 +354,14 @@ class AdaptivePurificationForward(PurificationModule):
                 224, 224), mode='bilinear', align_corners=False))
         else:
             x_clf = diff2clf(x_diff)
+        if self.args.save_purify_img:
+            torch.save(x_clf, os.path.join(self.args.adv_data_dir, "adv_data", f"purified_examples_batch_{self.args.batch_seed}.pt"))
         logits = self.clf(x_clf)
         return logits
 
 
     
-def get_diffusion_params(t_values, num_denoising_steps): #TODO:Rename
+def get_diffusion_params(t_values, num_denoising_steps):
     # Round up to ensure we get num_denoising_steps steps
     num_denoising_steps += 1
     if num_denoising_steps == 2: #edge case where t=1

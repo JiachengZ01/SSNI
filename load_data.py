@@ -26,12 +26,12 @@ def load_cifar10_sub(root, num_sub, data_seed=0):
 
 
 
-def load_dataset_by_name(dataset, root='./dataset', num_sub=512):
+def load_dataset_by_name(dataset, data_seed, root='./dataset', num_sub=512):
     if dataset == 'cifar10':
         dataset = load_cifar10_sub(root, num_sub)
     elif dataset == 'imagenet':
         val_transform = get_transform(dataset, 'imval', base_size=224)
         dataset = imagenet_lmdb_dataset_sub(root, transform=val_transform,
-                                                  num_sub=num_sub)
+                                                  num_sub=num_sub, data_seed = data_seed)
     print('dataset len: ', len(dataset))
     return dataset

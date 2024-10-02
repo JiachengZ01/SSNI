@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from tqdm import tqdm
 from eps_calculation import reweight_t
-from eps_standard import cf10_eps_standard, imagenet_eps_standard
+from eps_standard import load_dataset_eps
 
 
 class PGDL2:
@@ -62,7 +62,7 @@ class PGDL2:
 
 
 class Whitebox_PGDL2:
-    def __init__(self, diffusion, args, config, get_logit, attack_steps=200, eps=0.5, step_size=0.007, target=None, eot=20):
+    def __init__(self, diffusion, args, config, get_logit, attack_steps=200, eps=0.5, step_size=0.007, target=None, eot=20, is_linear=False):
         self.target = target
         self.clamp = (0,1)
         self.eps = eps
@@ -73,6 +73,7 @@ class Whitebox_PGDL2:
         self.diffusion = diffusion
         self.args = args
         self.config = config
+        self.is_linear = is_linear
 
     def _random_init(self, x):
         x = x + (torch.rand(x.size(), dtype=x.dtype, device=x.device).to(x.device) - 0.5) * 2 * self.eps
@@ -85,22 +86,21 @@ class Whitebox_PGDL2:
 
     def forward(self, x, y):
         x_adv = x.detach().clone()
-        if self.args.dataset == "cifar10":
-            eps_standard = cf10_eps_standard
-        elif self.args.dataset == "imagenet":
-            eps_standard = imagenet_eps_standard
+        eps_standard = load_dataset_eps(self.args)
         
         for _ in tqdm(range(self.attack_steps), desc="Whitebox PGDL2 Attacking:", leave=False):
             grad = torch.zeros_like(x_adv)
 
-            reweight_range, adv_eps = reweight_t(x_adv, self.diffusion, eps_standard, self.args, self.config)
+            eps_range, adv_eps = reweight_t(x_adv, self.diffusion, eps_standard, self.args, self.config)
             
             for _ in range(self.eot):
                 x_adv.requires_grad = True
                 
                 # Classification
-                # logits = self.get_logit(x_adv, reweight_range, adv_eps)
-                logits = self.get_logit(x_adv, eps_standard, adv_eps)
+                if self.is_linear:
+                    logits = self.get_logit(x_adv, eps_range, adv_eps)
+                else:
+                    logits = self.get_logit(x_adv, eps_standard, adv_eps)
 
                 # Calculate loss
                 loss = F.cross_entropy(logits, y, reduction="sum")

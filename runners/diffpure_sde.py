@@ -221,7 +221,7 @@ class RevGuidedDiffusion(torch.nn.Module):
             epsilon_dt0, epsilon_dt1 = 0, 1e-5
             t0, t1 = 1 - self.args.t * 1. / 1000 + epsilon_dt0, 1 - epsilon_dt1
             t_size = 2
-            ts = torch.linspace(t0, t1, t_size).to(self.device)
+            ts = torch.linspace(t0, t1, t_size).to(self.device) 
 
             x_ = x.view(batch_size, -1)  # (batch_size, state_size)
             if self.args.use_bm:
