@@ -2,7 +2,7 @@
 
 ## Overview
 
-This project provides implementations for "Sample-specific Score-aware Noise Injection For Diffusion-Based Adversarial Purification". The experiments are conducted on the CIFAR-10 and ImageNet datasets. The codebase allows for separate execution of attack generation and evaluation phases.
+This project provides implementations for "Sample-specific Noise Injection For Diffusion-Based Adversarial Purification". The experiments are conducted on the CIFAR-10 and ImageNet datasets. The codebase allows for separate execution of attack generation and evaluation phases.
 
 ## Datasets
 
